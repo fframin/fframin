@@ -1,5 +1,5 @@
 // オフライン対応と「共有」受け取り（Web Share Target）用の Service Worker
-const CACHE = 'buzz-recipes-v1';
+const CACHE = 'buzz-recipes-v2';
 const SHELL = [
   './',
   './index.html',
@@ -8,6 +8,10 @@ const SHELL = [
   './js/db.js',
   './js/image.js',
   './js/ocr.js',
+  './js/recipe-text.js',
+  './js/card.js',
+  './js/ai.js',
+  './js/importer.js',
   './manifest.webmanifest',
   './icons/icon.svg',
   './icons/icon-192.png',

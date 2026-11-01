@@ -293,3 +293,39 @@ textarea { resize: vertical; line-height: 1.6; }
   transition: opacity .2s, transform .2s; z-index: 50;
 }
 #toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+/* ---- 取り込み・AI ---- */
+.tool-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.btn-ai {
+  background: linear-gradient(135deg, #7048e8, #d6336c); border-color: transparent; color: #fff;
+}
+.btn-ai:disabled { opacity: .75; }
+.import-box { background: var(--surface-2); padding: 14px; border-radius: var(--radius); }
+.field-row { display: flex; gap: 12px; align-items: flex-end; }
+.field-row .grow { flex: 1; min-width: 0; }
+.field-row .servings { width: 96px; flex: none; }
+.filled { animation: filled 1.6s ease-out; }
+@keyframes filled { 0%, 30% { background: var(--accent-soft); border-color: var(--accent); } }
+.spinner.small { width: 16px; height: 16px; border-width: 2px; border-color: rgb(255 255 255 / .4); border-top-color: #fff; }
+.preview .cover.gen { background: #7048e8; }
+.stack { display: grid; gap: 10px; margin-top: 8px; }
+.panel .row input { flex: 1; min-width: 0; }
+.panel input:not([type="checkbox"]):not([type="file"]) {
+  width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); outline: none;
+}
+.panel input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* ---- 分量の計算 ---- */
+.block-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.block-head h2 { margin: 0; }
+.stepper { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+.stepper button { width: 38px; height: 34px; border: 0; background: var(--surface-2); font-size: 18px; cursor: pointer; }
+.stepper span { min-width: 72px; text-align: center; font-weight: 700; font-size: 14px; }
+.scale-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.ratio-now { font-size: 13px; color: var(--accent); font-weight: 700; }
+.amt {
+  border: 0; padding: 0 3px; margin: 0 1px; font: inherit; color: inherit; cursor: pointer;
+  background: transparent; border-bottom: 2px dotted var(--accent); border-radius: 0;
+}
+.amt:hover, .amt:focus-visible { background: var(--accent-soft); outline: none; }
+.amt.scaled, .scaled { color: var(--accent); font-weight: 700; }

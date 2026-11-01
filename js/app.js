@@ -1,5 +1,9 @@
 import * as db from './db.js';
 import { processImage } from './image.js';
+import { scaleText, firstAmount, formatAmount, parseUserAmount, parseRecipeText, toHalfWidth } from './recipe-text.js';
+import { makeRecipeCard } from './card.js';
+import { extractRecipe, getApiKey, setApiKey } from './ai.js';
+import { importFromUrl, getImportSettings, setImportSettings } from './importer.js';
 
 // ---------- 定数・ユーティリティ ----------
 
@@ -304,16 +308,19 @@ async function renderList(seq) {
 
 // ---------- 登録・編集フォーム ----------
 
+const linesToText = (v) => (Array.isArray(v) ? v.map((s) => String(s).trim()).filter(Boolean).join('\n') : String(v || '').trim());
+
 async function renderForm(recipe, params) {
   const isNew = !recipe;
   const all = await db.getAll();
   const knownTags = tagCounts(all).map(([t]) => t);
 
   const draft = recipe
-    ? structuredClone({ ...recipe, images: [] })
-    : { title: '', url: '', source: '', author: '', tags: [], ingredients: '', steps: '', memo: '' };
-  // 画像は Blob のまま扱う（structuredClone を避けてそのまま参照）
-  const images = recipe ? [...recipe.images] : [];
+    ? { ...recipe, images: [] }
+    : { title: '', url: '', source: '', author: '', tags: [], servings: null, ingredients: '', steps: '', memo: '' };
+  // 画像は Blob のまま扱う。generated: true は文章から自動で作ったカード画像
+  let images = recipe ? [...recipe.images] : [];
+  let pasteInit = '';
 
   // 他アプリの「共有」から来た場合
   if (isNew && params.get('shared')) {
@@ -322,8 +329,7 @@ async function renderForm(recipe, params) {
       const url = safeUrl(shared.url) || extractUrl(shared.text) || extractUrl(shared.title);
       draft.url = url;
       draft.source = detectSource(url);
-      const text = [shared.title, shared.text].filter(Boolean).join('\n').replace(url, '').trim();
-      if (text) draft.memo = text;
+      pasteInit = [shared.title, shared.text].filter(Boolean).join('\n').replace(url, '').trim();
       for (const f of shared.files || []) {
         try {
           images.push(await processImage(f));
@@ -335,15 +341,18 @@ async function renderForm(recipe, params) {
     }
   }
 
+  const hasAiKey = Boolean(getApiKey());
+  const hasImporter = Boolean(getImportSettings().url);
+
   view.innerHTML = `
     <form class="form" id="form" novalidate>
       <div class="form-head">
         <h1>${isNew ? 'レシピを登録' : 'レシピを編集'}</h1>
-        <p class="hint">${isNew ? '写真だけで保存できます。ほかの項目はあとから追加してもOK。' : ''}</p>
+        <p class="hint">${isNew ? '写真か投稿文のどちらかだけで保存できます。ほかの項目はあとから追加してもOK。' : ''}</p>
       </div>
 
       <section class="field">
-        <span class="label">写真 <em>（SNSのスクショなど・複数枚OK）</em></span>
+        <span class="label">写真 <em>（SNSのスクショ・料理写真など・複数枚OK）</em></span>
         <div class="drop" id="drop" tabindex="0" role="button" aria-label="写真を選ぶ">
           <input type="file" id="file" accept="image/*" multiple hidden>
           <div class="drop-inner">
@@ -353,16 +362,19 @@ async function renderForm(recipe, params) {
           </div>
         </div>
         <div class="previews" id="previews"></div>
-        <div class="ocr-row" id="ocrRow" hidden>
-          <button type="button" class="btn btn-ghost" id="ocrBtn">🔍 写真から文字を読み取る</button>
-          <span class="hint">材料や作り方が画像に書かれているときに便利です</span>
+        <div class="tool-row" id="photoTools">
+          <button type="button" class="btn btn-ai" id="aiBtn">✨ AIでレシピを書き起こす</button>
+          <button type="button" class="btn btn-ghost" id="ocrBtn">🔍 写真の文字を読み取る</button>
+          <button type="button" class="btn btn-ghost" id="cardBtn">🎨 文章から画像を作る</button>
         </div>
+        <p class="hint" id="photoHint"></p>
         <div class="ocr-result" id="ocrResult" hidden>
           <div class="progress" id="ocrProgress" hidden><div></div><span></span></div>
           <textarea id="ocrText" rows="6" aria-label="読み取ったテキスト"></textarea>
           <div class="ocr-actions">
-            <span class="hint">選択した部分（未選択なら全文）を追加：</span>
-            <button type="button" class="btn btn-small" data-ocr-to="title">タイトルへ</button>
+            <button type="button" class="btn btn-small btn-primary" id="ocrSplit">自動で振り分ける</button>
+            <span class="hint">または選択した部分を：</span>
+            <button type="button" class="btn btn-small" data-ocr-to="title">料理名へ</button>
             <button type="button" class="btn btn-small" data-ocr-to="ingredients">材料へ</button>
             <button type="button" class="btn btn-small" data-ocr-to="steps">作り方へ</button>
             <button type="button" class="btn btn-small" data-ocr-to="memo">メモへ</button>
@@ -370,15 +382,34 @@ async function renderForm(recipe, params) {
         </div>
       </section>
 
-      <label class="field">
-        <span class="label">料理名</span>
-        <input name="title" value="${esc(draft.title)}" placeholder="例：レンジで5分！やみつき無限キャベツ" maxlength="120">
-      </label>
+      <section class="field import-box">
+        <span class="label">📝 SNSの投稿文から登録</span>
+        <textarea id="pasteText" rows="4" placeholder="InstagramやXの投稿文（キャプション）をコピーして貼り付けると、料理名・材料・作り方・タグに自動で振り分けます">${esc(pasteInit)}</textarea>
+        <div class="tool-row">
+          ${navigator.clipboard?.readText ? '<button type="button" class="btn btn-small" id="clipBtn">📋 コピーした文章を貼り付け</button>' : ''}
+          <button type="button" class="btn btn-small btn-primary" id="splitBtn">自動で振り分ける</button>
+        </div>
+      </section>
 
-      <label class="field">
-        <span class="label">元の投稿のURL</span>
-        <input name="url" type="url" inputmode="url" value="${esc(draft.url)}" placeholder="https://www.instagram.com/p/..." autocomplete="off">
-      </label>
+      <div class="field">
+        <label class="label" for="urlInput">元の投稿のURL</label>
+        <input name="url" id="urlInput" type="url" inputmode="url" value="${esc(draft.url)}" placeholder="https://www.instagram.com/p/..." autocomplete="off">
+        <div class="tool-row">
+          <button type="button" class="btn btn-small" id="importBtn">📥 このURLから写真と文章を取り込む</button>
+          ${hasImporter ? '' : '<span class="hint">（設定画面で取り込みサーバーを登録すると使えます）</span>'}
+        </div>
+      </div>
+
+      <div class="field-row">
+        <label class="field grow">
+          <span class="label">料理名</span>
+          <input name="title" value="${esc(draft.title)}" placeholder="例：レンジで5分！やみつき無限キャベツ" maxlength="120">
+        </label>
+        <label class="field servings">
+          <span class="label">何人分</span>
+          <input name="servings" type="number" inputmode="numeric" min="1" max="99" value="${draft.servings || ''}" placeholder="2">
+        </label>
+      </div>
 
       <div class="field">
         <span class="label">どこで見つけた？</span>
@@ -411,7 +442,7 @@ async function renderForm(recipe, params) {
       }
 
       <label class="field">
-        <span class="label">材料 <em>（1行に1つ）</em></span>
+        <span class="label">材料 <em>（1行に1つ。「鶏むね肉 300g」のように書くと分量を自動計算できます）</em></span>
         <textarea name="ingredients" rows="5" placeholder="キャベツ 1/4玉&#10;鶏ガラスープの素 小さじ1&#10;ごま油 大さじ1">${esc(draft.ingredients)}</textarea>
       </label>
 
@@ -432,32 +463,46 @@ async function renderForm(recipe, params) {
     </form>`;
 
   const form = $('#form');
+  const f = form.elements;
   const fileInput = $('#file');
   const drop = $('#drop');
+  const pasteText = $('#pasteText');
   let processing = 0;
+  let appliedPaste = '';
+
+  const realImages = () => images.filter((im) => !im.generated);
 
   const drawPreviews = () => {
-    $('#previews').innerHTML = images
-      .map(
-        (im, i) => `
+    $('#previews').innerHTML =
+      images
+        .map(
+          (im, i) => `
         <figure class="preview">
           <img src="${blobUrl(im.thumb)}" alt="写真${i + 1}">
-          ${i === 0 ? '<span class="cover">表紙</span>' : `<button type="button" class="mini" data-cover="${i}" title="表紙にする">表紙に</button>`}
+          ${im.generated ? '<span class="cover gen">自動作成</span>' : i === 0 ? '<span class="cover">表紙</span>' : `<button type="button" class="mini" data-cover="${i}" title="表紙にする">表紙に</button>`}
           <button type="button" class="remove" data-remove="${i}" aria-label="写真${i + 1}を削除">×</button>
         </figure>`
-      )
-      .join('') + (processing ? `<div class="preview loading" aria-label="処理中"><span class="spinner"></span></div>` : '');
-    $('#ocrRow').hidden = images.length === 0;
+        )
+        .join('') + (processing ? `<div class="preview loading" aria-label="処理中"><span class="spinner"></span></div>` : '');
+    const hasPhotos = realImages().length > 0;
+    $('#ocrBtn').hidden = !hasPhotos;
+    $('#cardBtn').hidden = hasPhotos;
+    $('#photoHint').textContent = hasPhotos
+      ? hasAiKey
+        ? 'AIなら、レシピが書かれていない料理写真からも作り方を推測できます'
+        : '「写真の文字を読み取る」で、画像に書かれた材料や作り方を文字にできます'
+      : '写真がないときは、保存時に文章からカード画像を自動で作ります';
   };
 
-  const addFiles = async (files) => {
-    const list = [...files].filter((f) => f.type.startsWith('image/') || /\.(heic|heif)$/i.test(f.name));
+  const addBlobs = async (blobs) => {
+    const list = [...blobs].filter((b) => (b.type || '').startsWith('image/') || /\.(heic|heif)$/i.test(b.name || ''));
     if (!list.length) return;
+    images = realImages(); // 本物の写真が来たら自動作成のカードは外す
     processing += list.length;
     drawPreviews();
-    for (const f of list) {
+    for (const b of list) {
       try {
-        images.push(await processImage(f));
+        images.push(await processImage(b));
       } catch (err) {
         toast(err.message, 4000);
       } finally {
@@ -477,7 +522,7 @@ async function renderForm(recipe, params) {
     }
   });
   fileInput.addEventListener('change', () => {
-    addFiles(fileInput.files);
+    addBlobs(fileInput.files);
     fileInput.value = '';
   });
   ['dragenter', 'dragover'].forEach((ev) =>
@@ -489,14 +534,14 @@ async function renderForm(recipe, params) {
   ['dragleave', 'drop'].forEach((ev) => drop.addEventListener(ev, () => drop.classList.remove('over')));
   drop.addEventListener('drop', (e) => {
     e.preventDefault();
-    addFiles(e.dataTransfer.files);
+    addBlobs(e.dataTransfer.files);
   });
   const onPaste = (e) => {
     if (!document.body.contains(form)) return document.removeEventListener('paste', onPaste);
     const files = [...(e.clipboardData?.files || [])];
     if (files.length) {
       e.preventDefault();
-      addFiles(files);
+      addBlobs(files);
     }
   };
   document.addEventListener('paste', onPaste);
@@ -510,7 +555,6 @@ async function renderForm(recipe, params) {
   });
 
   // URL を入れたら SNS を自動判定
-  const urlInput = form.elements.url;
   const setSource = (s) => {
     draft.source = s;
     $$('#sourceChips .chip').forEach((c) => {
@@ -518,8 +562,8 @@ async function renderForm(recipe, params) {
       c.setAttribute('aria-checked', c.dataset.source === s);
     });
   };
-  urlInput.addEventListener('input', () => {
-    const s = detectSource(urlInput.value.trim());
+  f.url.addEventListener('input', () => {
+    const s = detectSource(f.url.value.trim());
     if (s) setSource(s);
   });
   $('#sourceChips').addEventListener('click', (e) => {
@@ -530,13 +574,144 @@ async function renderForm(recipe, params) {
   $('#tagSuggest')?.addEventListener('click', (e) => {
     const c = e.target.closest('[data-addtag]');
     if (!c) return;
-    const input = $('#tagsInput');
-    const tags = parseTags(input.value);
+    const tags = parseTags(f.tags.value);
     if (!tags.includes(c.dataset.addtag)) tags.push(c.dataset.addtag);
-    input.value = tags.join(' ');
+    f.tags.value = tags.join(' ');
   });
 
-  // 文字読み取り
+  /**
+   * 読み取った内容を各欄に入れる。入力済みの欄があれば上書きするか確認する（ask=false なら空欄だけ埋める）
+   */
+  const applyRecipe = (p, { ask = true } = {}) => {
+    const incoming = {
+      title: String(p.title || '').trim(),
+      ingredients: linesToText(p.ingredients),
+      steps: linesToText(p.steps),
+    };
+    const conflicts = Object.entries(incoming).filter(([k, v]) => v && f[k].value.trim() && f[k].value.trim() !== v);
+    const overwrite =
+      ask && conflicts.length
+        ? confirm('入力済みの項目があります。読み取った内容で置き換えますか？\n（キャンセルすると空欄だけ埋めます）')
+        : false;
+    const changed = [];
+    const set = (name, v) => {
+      if (!v || (f[name].value.trim() && !overwrite) || f[name].value.trim() === v) return;
+      f[name].value = v;
+      changed.push(f[name]);
+    };
+    set('title', incoming.title);
+    set('ingredients', incoming.ingredients);
+    set('steps', incoming.steps);
+    if (p.servings > 0) set('servings', String(p.servings));
+    set('author', String(p.author || '').trim());
+    const memo = linesToText(p.memo);
+    if (memo && !f.memo.value.includes(memo)) {
+      f.memo.value = [f.memo.value.trim(), memo].filter(Boolean).join('\n');
+      changed.push(f.memo);
+    }
+    if (p.tags?.length) {
+      const tags = parseTags(f.tags.value);
+      const before = tags.length;
+      for (const t of p.tags) if (!tags.includes(t)) tags.push(String(t).replace(/^[#＃]/, ''));
+      if (tags.length !== before) {
+        f.tags.value = tags.join(' ');
+        changed.push(f.tags);
+      }
+    }
+    if (p.url && !f.url.value.trim()) {
+      f.url.value = p.url;
+      setSource(detectSource(p.url));
+      changed.push(f.url);
+    }
+    changed.forEach((el) => {
+      el.classList.remove('filled');
+      void el.offsetWidth;
+      el.classList.add('filled');
+    });
+    return changed.length;
+  };
+
+  // 投稿文の振り分け
+  const splitPaste = (opts) => {
+    const text = pasteText.value.trim();
+    if (!text) return 0;
+    appliedPaste = pasteText.value;
+    return applyRecipe(parseRecipeText(text), opts);
+  };
+  $('#splitBtn').addEventListener('click', () => {
+    if (!pasteText.value.trim()) return toast('投稿文を貼り付けてください');
+    const n = splitPaste();
+    toast(n ? '振り分けました。内容を確認してください' : '振り分けられる項目が見つかりませんでした');
+  });
+  $('#clipBtn')?.addEventListener('click', async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text.trim()) return toast('コピーされた文章がありません');
+      pasteText.value = text;
+      const url = extractUrl(text);
+      if (url && !f.url.value.trim()) {
+        f.url.value = url;
+        setSource(detectSource(url));
+      }
+      const n = splitPaste();
+      toast(n ? '貼り付けて振り分けました' : '貼り付けました');
+    } catch {
+      toast('貼り付けを許可してください（または入力欄に直接貼り付けてください）', 4000);
+    }
+  });
+
+  // URL から取り込み（取り込みサーバー経由）
+  $('#importBtn').addEventListener('click', async () => {
+    const url = safeUrl(f.url.value.trim());
+    if (!url) return toast('先に元の投稿のURLを入力してください');
+    const btn = $('#importBtn');
+    btn.disabled = true;
+    btn.textContent = '取り込み中…';
+    try {
+      const data = await importFromUrl(url);
+      if (data.images.length) await addBlobs(data.images);
+      const text = [data.title, data.text].filter(Boolean).join('\n');
+      if (text) {
+        pasteText.value = text;
+        appliedPaste = text;
+        applyRecipe({ ...parseRecipeText(text), author: data.author }, { ask: true });
+      } else if (data.author) applyRecipe({ author: data.author });
+      const msg = [];
+      if (data.images.length) msg.push(`写真${data.images.length}枚`);
+      if (text) msg.push('投稿文');
+      toast(msg.length ? `${msg.join('と')}を取り込みました${data.failedImages ? `（写真${data.failedImages}枚は取得できませんでした）` : ''}` : '取り込める内容が見つかりませんでした', 4000);
+    } catch (err) {
+      toast(err.message, 5000);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '📥 このURLから写真と文章を取り込む';
+    }
+  });
+
+  // AI で書き起こし
+  $('#aiBtn').addEventListener('click', async () => {
+    const photos = realImages();
+    const text = pasteText.value.trim();
+    if (!photos.length && !text) return toast('写真を選ぶか、投稿文を貼り付けてください');
+    if (!getApiKey()) return toast('設定画面でClaudeのAPIキーを登録すると使えます', 4000);
+    const btn = $('#aiBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner small"></span> AIが書き起こし中…';
+    try {
+      const r = await extractRecipe({ images: photos.map((im) => im.full), text, url: f.url.value.trim() });
+      if (text) appliedPaste = pasteText.value;
+      const n = applyRecipe(r);
+      toast(r.estimated ? '写真から作り方を推測しました。内容を確認してください' : n ? '書き起こしました。内容を確認してください' : '新しく入る内容はありませんでした', 4000);
+    } catch (err) {
+      console.error(err);
+      toast(err.message, 5000);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '✨ AIでレシピを書き起こす';
+    }
+  });
+
+  // 文字読み取り（OCR）
   $('#ocrBtn').addEventListener('click', async () => {
     const btn = $('#ocrBtn');
     const box = $('#ocrResult');
@@ -547,7 +722,7 @@ async function renderForm(recipe, params) {
     try {
       const { recognizeText } = await import('./ocr.js');
       const text = await recognizeText(
-        images.map((im) => im.full),
+        realImages().map((im) => im.full),
         (ratio, label) => {
           prog.firstElementChild.style.width = `${Math.round(ratio * 100)}%`;
           prog.lastElementChild.textContent = label;
@@ -562,46 +737,79 @@ async function renderForm(recipe, params) {
       btn.disabled = false;
     }
   });
+  $('#ocrSplit').addEventListener('click', () => {
+    const n = applyRecipe(parseRecipeText($('#ocrText').value));
+    toast(n ? '振り分けました。内容を確認してください' : '振り分けられる項目が見つかりませんでした');
+  });
   $('#ocrResult').addEventListener('click', (e) => {
     const b = e.target.closest('[data-ocr-to]');
     if (!b) return;
     const ta = $('#ocrText');
     const sel = ta.value.slice(ta.selectionStart, ta.selectionEnd).trim() || ta.value.trim();
     if (!sel) return;
-    const field = form.elements[b.dataset.ocrTo];
+    const field = f[b.dataset.ocrTo];
     if (b.dataset.ocrTo === 'title') field.value = sel.split('\n')[0].slice(0, 120);
     else field.value = field.value ? `${field.value.replace(/\s+$/, '')}\n${sel}` : sel;
     field.focus();
     toast('追加しました');
   });
 
+  // 文章からカード画像
+  const buildCard = async (title) => {
+    const blob = await makeRecipeCard({ title, ingredients: f.ingredients.value, tags: parseTags(f.tags.value) });
+    const im = await processImage(blob);
+    return { ...im, generated: true };
+  };
+  $('#cardBtn').addEventListener('click', async () => {
+    const title = f.title.value.trim();
+    if (!title && !f.ingredients.value.trim()) return toast('料理名か材料を入れると画像を作れます');
+    images = [await buildCard(title || 'レシピ')];
+    drawPreviews();
+    toast('カード画像を作りました');
+  });
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (processing) return toast('写真を処理中です。少しお待ちください');
-    const f = form.elements;
+    // 貼り付けたまま振り分けていない投稿文は、空欄にだけ自動で入れる
+    if (pasteText.value.trim() && pasteText.value !== appliedPaste) splitPaste({ ask: false });
+
     const title = f.title.value.trim();
-    if (!images.length && !title) {
-      toast('写真か料理名のどちらかを入れてください');
+    const hasText = title || f.ingredients.value.trim() || f.steps.value.trim() || f.memo.value.trim();
+    if (!realImages().length && !hasText) {
+      toast('写真か投稿文（または料理名）を入れてください');
       return;
     }
     const url = safeUrl(f.url.value.trim());
     if (f.url.value.trim() && !url) return toast('URLの形式が正しくありません');
     const now = Date.now();
-    const saved = {
-      ...(recipe || { id: uid(), createdAt: now, favorite: false, cookedCount: 0, lastCookedAt: null }),
-      title: title || `${formatDate(now)} のレシピ`,
-      url,
-      source: draft.source || detectSource(url) || '',
-      author: f.author.value.trim(),
-      tags: parseTags(f.tags.value),
-      ingredients: f.ingredients.value.trim(),
-      steps: f.steps.value.trim(),
-      memo: f.memo.value.trim(),
-      images,
-      updatedAt: now,
-    };
+    const finalTitle = title || `${formatDate(now)} のレシピ`;
     $('#saveBtn').disabled = true;
     try {
+      // 写真がなければ（または自動作成のカードだけなら最新の内容で）カード画像を作る
+      if (!realImages().length) {
+        try {
+          images = [await buildCard(finalTitle)];
+        } catch (err) {
+          console.warn(err);
+          images = [];
+        }
+      }
+      const servings = parseInt(toHalfWidth(f.servings.value), 10);
+      const saved = {
+        ...(recipe || { id: uid(), createdAt: now, favorite: false, cookedCount: 0, lastCookedAt: null }),
+        title: finalTitle,
+        url,
+        source: draft.source || detectSource(url) || '',
+        author: f.author.value.trim(),
+        tags: parseTags(f.tags.value),
+        servings: servings > 0 ? servings : null,
+        ingredients: f.ingredients.value.trim(),
+        steps: f.steps.value.trim(),
+        memo: f.memo.value.trim(),
+        images,
+        updatedAt: now,
+      };
       await db.put(saved);
       toast(isNew ? '保存しました' : '更新しました');
       go(`#/r/${saved.id}`);
@@ -611,8 +819,6 @@ async function renderForm(recipe, params) {
       $('#saveBtn').disabled = false;
     }
   });
-
-  if (isNew && !images.length) form.elements.title.blur();
 }
 
 // ---------- 詳細 ----------
@@ -624,10 +830,25 @@ function lines(text) {
     .filter(Boolean);
 }
 
+const RATIOS = [
+  [0.5, '×1/2'],
+  [1, '×1'],
+  [1.5, '×1.5'],
+  [2, '×2'],
+  [3, '×3'],
+];
+
+function formatRatio(r) {
+  const x = Math.round(r * 100) / 100;
+  return `×${x}`;
+}
+
 function renderDetail(r) {
   const url = safeUrl(r.url);
   const ingredients = lines(r.ingredients);
   const steps = lines(r.steps).map((s) => s.replace(/^(?:\d+\s*[.)．、:：]|[①-⑳]|step\s*\d+[.:：]?)\s*/i, ''));
+  const baseServings = r.servings || null;
+  const scalable = ingredients.some((l) => firstAmount(l)) || steps.some((s) => scaleText(s, 2, 'step').some((p) => p.scaled));
 
   view.innerHTML = `
     <article class="detail">
@@ -657,16 +878,37 @@ function renderDetail(r) {
 
         ${
           ingredients.length
-            ? `<section class="block"><h2>材料</h2><ul class="checklist">${ingredients
-                .map((l, i) => `<li><label><input type="checkbox" id="ing${i}"><span>${esc(l)}</span></label></li>`)
-                .join('')}</ul></section>`
+            ? `<section class="block">
+                <div class="block-head">
+                  <h2>材料</h2>
+                  ${
+                    baseServings
+                      ? `<div class="stepper" role="group" aria-label="人数">
+                          <button type="button" data-serv="-1" aria-label="1人分減らす">−</button>
+                          <span id="servLabel"></span>
+                          <button type="button" data-serv="1" aria-label="1人分増やす">＋</button>
+                        </div>`
+                      : ''
+                  }
+                </div>
+                ${
+                  scalable
+                    ? `<div class="scale-bar">
+                        <div class="chips small" id="ratioChips">${RATIOS.map(([v, l]) => `<button type="button" class="chip" data-ratio="${v}">${l}</button>`).join('')}</div>
+                        <span class="ratio-now" id="ratioNow" hidden></span>
+                      </div>
+                      <p class="hint">下線の分量をタップして手元の量を入れると、ほかの材料も同じ割合で計算し直します</p>`
+                    : ''
+                }
+                <ul class="checklist" id="ingList"></ul>
+              </section>`
             : ''
         }
-        ${steps.length ? `<section class="block"><h2>作り方</h2><ol class="steps">${steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol></section>` : ''}
+        ${steps.length ? `<section class="block"><h2>作り方</h2><ol class="steps" id="stepList"></ol></section>` : ''}
         ${r.memo ? `<section class="block"><h2>メモ</h2><p class="memo">${esc(r.memo)}</p></section>` : ''}
         ${
           !ingredients.length && !steps.length && !r.memo
-            ? `<p class="hint">材料や作り方を書いておくと、検索で見つけやすくなります。<a href="#/r/${esc(r.id)}/edit">追加する</a></p>`
+            ? `<p class="hint">材料や作り方を書いておくと、検索で見つけやすくなり、分量の計算もできます。<a href="#/r/${esc(r.id)}/edit">追加する</a></p>`
             : ''
         }
 
@@ -677,6 +919,86 @@ function renderDetail(r) {
       </div>
     </article>
     <dialog id="zoom" class="zoom"><form method="dialog"><button aria-label="閉じる">×</button></form><img alt=""></dialog>`;
+
+  // --- 分量の計算 ---
+  let ratio = 1;
+  const checked = new Set();
+  const segHtml = (parts, lineIndex) => {
+    let tappable = lineIndex != null;
+    return parts
+      .map((p) => {
+        if (!p.amount) return esc(p.text);
+        if (tappable) {
+          tappable = false; // 1行につき最初の分量だけをタップ対象にする
+          return `<button type="button" class="amt${p.scaled ? ' scaled' : ''}" data-line="${lineIndex}">${esc(p.text)}</button>`;
+        }
+        return p.scaled ? `<b class="scaled">${esc(p.text)}</b>` : esc(p.text);
+      })
+      .join('');
+  };
+  const drawScaled = () => {
+    const ing = $('#ingList');
+    if (ing) {
+      ing.innerHTML = ingredients
+        .map(
+          (l, i) =>
+            `<li><label><input type="checkbox" data-i="${i}"${checked.has(i) ? ' checked' : ''}><span class="ing-text">${segHtml(scaleText(l, ratio), firstAmount(l) ? i : null)}</span></label></li>`
+        )
+        .join('');
+    }
+    const st = $('#stepList');
+    if (st) st.innerHTML = steps.map((s) => `<li>${segHtml(scaleText(s, ratio, 'step'), null)}</li>`).join('');
+    const label = $('#servLabel');
+    if (label) {
+      const n = baseServings * ratio;
+      label.textContent = Number.isInteger(Math.round(n * 100) / 100) ? `${Math.round(n)}人分` : `約${Math.round(n * 10) / 10}人分`;
+    }
+    $$('#ratioChips .chip').forEach((c) => c.classList.toggle('on', Math.abs(Number(c.dataset.ratio) - ratio) < 1e-9));
+    const now = $('#ratioNow');
+    if (now) {
+      now.hidden = ratio === 1;
+      now.innerHTML = `${formatRatio(ratio)}で表示中 <button type="button" class="link" id="ratioReset">元に戻す</button>`;
+    }
+  };
+  const setRatio = (v) => {
+    if (!Number.isFinite(v) || v <= 0) return;
+    ratio = Math.min(50, Math.max(0.05, v));
+    drawScaled();
+  };
+  drawScaled();
+
+  view.querySelector('.detail').addEventListener('click', (e) => {
+    const chip = e.target.closest('[data-ratio]');
+    if (chip) return setRatio(Number(chip.dataset.ratio));
+    if (e.target.closest('#ratioReset')) return setRatio(1);
+    const serv = e.target.closest('[data-serv]');
+    if (serv) {
+      const cur = Math.round(baseServings * ratio);
+      const next = Math.max(1, cur + Number(serv.dataset.serv));
+      return setRatio(next / baseServings);
+    }
+    const amt = e.target.closest('.amt');
+    if (amt) {
+      e.preventDefault();
+      const line = ingredients[Number(amt.dataset.line)];
+      const base = firstAmount(line);
+      const name = line.slice(0, toHalfWidth(line).indexOf(base.raw)).replace(/[\s:：…]+$/, '') || 'この材料';
+      const shown = formatAmount(base.value * ratio, base.unit);
+      const unitLabel = base.prefix ? `${base.unit}` : '';
+      const unitSuffix = base.prefix ? '' : base.unit;
+      const answer = prompt(`手元の「${name}」の量を入れてください（${unitLabel}${shown}${unitSuffix} → ？）\nほかの材料も同じ割合で計算し直します。`, shown);
+      if (answer == null) return;
+      const v = parseUserAmount(answer);
+      if (!Number.isFinite(v) || v <= 0) return toast('数字で入力してください（例：450、1と1/2）');
+      setRatio(v / base.value);
+      toast(`${formatRatio(ratio)}で計算しました`);
+    }
+  });
+  $('#ingList')?.addEventListener('change', (e) => {
+    const i = Number(e.target.dataset.i);
+    if (e.target.checked) checked.add(i);
+    else checked.delete(i);
+  });
 
   const update = async (patch, msg) => {
     Object.assign(r, patch, { updatedAt: Date.now() });
@@ -750,6 +1072,8 @@ async function renderSettings() {
   const recipes = await db.getAll();
   const est = (await navigator.storage?.estimate?.()) || {};
   const persisted = await navigator.storage?.persisted?.();
+  const aiKey = getApiKey();
+  const imp = getImportSettings();
 
   view.innerHTML = `
     <section class="settings">
@@ -780,6 +1104,36 @@ async function renderSettings() {
       </div>
 
       <div class="panel">
+        <h2>✨ AIで書き起こし（Claude）</h2>
+        <p class="hint">写真や投稿文から、料理名・材料・作り方をAIが書き起こします。レシピが書かれていない料理写真からも作り方を推測できます。AnthropicのAPIキーが必要で、使った分だけ料金がかかります（1回あたり数円〜十数円程度）。</p>
+        ${
+          aiKey
+            ? `<p class="ok">✓ APIキー登録済み（…${esc(aiKey.slice(-4))}）</p>
+               <div class="row"><button type="button" class="btn btn-danger" id="aiKeyDel">キーを削除</button></div>`
+            : `<div class="row">
+                 <input type="password" id="aiKey" placeholder="sk-ant-..." autocomplete="off" spellcheck="false">
+                 <button type="button" class="btn btn-primary" id="aiKeySave">保存</button>
+               </div>`
+        }
+        <p class="hint">キーはこの端末のブラウザ内にだけ保存され、AnthropicのAPIを呼び出すときにだけ使います。キーは <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer">Claude Console</a> で発行できます。使いすぎ防止に、Console側で月の上限額を設定しておくと安心です。</p>
+      </div>
+
+      <div class="panel">
+        <h2>📥 SNS取り込みサーバー</h2>
+        <p class="hint">Instagram・X・TikTok・YouTubeの投稿URLから写真と文章を取り込むための中継サーバーです（SNSはブラウザから直接読み込めないため必要です）。Cloudflare Workers に無料で設置できます。手順はリポジトリの README を見てください。</p>
+        <div class="stack">
+          <label class="field"><span class="label">サーバーのURL</span>
+            <input type="url" id="impUrl" placeholder="https://buzz-import.xxxx.workers.dev" value="${esc(imp.url || '')}" autocomplete="off"></label>
+          <label class="field"><span class="label">合言葉（設定した場合）</span>
+            <input type="password" id="impToken" value="${esc(imp.token || '')}" autocomplete="off"></label>
+          <div class="row">
+            <button type="button" class="btn btn-primary" id="impSave">保存</button>
+            ${imp.url ? '<button type="button" class="btn btn-danger" id="impDel">削除</button>' : ''}
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
         <h2>スマホで使うには</h2>
         <ul class="tips">
           <li><b>iPhone（Safari）</b>：共有ボタン →「ホーム画面に追加」</li>
@@ -793,6 +1147,32 @@ async function renderSettings() {
     const ok = await navigator.storage.persist();
     toast(ok ? 'データ保護を有効にしました' : 'ブラウザに許可されませんでした。ホーム画面に追加すると有効になりやすいです', 4000);
     if (ok) renderSettings();
+  });
+
+  $('#aiKeySave')?.addEventListener('click', () => {
+    const key = $('#aiKey').value.trim();
+    if (!/^sk-ant-/.test(key)) return toast('「sk-ant-」で始まるAPIキーを入力してください');
+    setApiKey(key);
+    toast('APIキーを保存しました');
+    renderSettings();
+  });
+  $('#aiKeyDel')?.addEventListener('click', () => {
+    if (!confirm('この端末からAPIキーを削除しますか？')) return;
+    setApiKey('');
+    toast('削除しました');
+    renderSettings();
+  });
+  $('#impSave').addEventListener('click', () => {
+    const url = safeUrl($('#impUrl').value.trim());
+    if (!url) return toast('サーバーのURLを入力してください');
+    setImportSettings({ url, token: $('#impToken').value.trim() });
+    toast('保存しました');
+    renderSettings();
+  });
+  $('#impDel')?.addEventListener('click', () => {
+    setImportSettings({});
+    toast('削除しました');
+    renderSettings();
   });
 
   const status = $('#backupStatus');
