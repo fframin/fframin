@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>バズレシピ帳</title>
+  <meta name="description" content="InstagramやXで見つけたレシピを、写真をアップロードするだけで保存・整理できるアプリ">
+  <meta name="theme-color" content="#e8590c">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="バズレシピ帳">
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a href="#/" class="brand" aria-label="一覧へ">
+      <img src="icons/icon.svg" alt="" width="28" height="28">
+      <span>バズレシピ帳</span>
+    </a>
+    <a href="#/settings" class="icon-btn" aria-label="設定・バックアップ" title="設定・バックアップ">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm0 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4Zm8.6-3.3-1.7-.3a7 7 0 0 0-.7-1.6l1-1.4a1 1 0 0 0-.1-1.3l-1.2-1.2a1 1 0 0 0-1.3-.1l-1.4 1a7 7 0 0 0-1.6-.7l-.3-1.7A1 1 0 0 0 12.3 3h-1.6a1 1 0 0 0-1 .8l-.3 1.7a7 7 0 0 0-1.6.7l-1.4-1a1 1 0 0 0-1.3.1L3.9 6.5a1 1 0 0 0-.1 1.3l1 1.4a7 7 0 0 0-.7 1.6l-1.7.3a1 1 0 0 0-.8 1v1.6a1 1 0 0 0 .8 1l1.7.3c.2.6.4 1.1.7 1.6l-1 1.4a1 1 0 0 0 .1 1.3l1.2 1.2a1 1 0 0 0 1.3.1l1.4-1c.5.3 1 .5 1.6.7l.3 1.7a1 1 0 0 0 1 .8h1.6a1 1 0 0 0 1-.8l.3-1.7c.6-.2 1.1-.4 1.6-.7l1.4 1a1 1 0 0 0 1.3-.1l1.2-1.2a1 1 0 0 0 .1-1.3l-1-1.4c.3-.5.5-1 .7-1.6l1.7-.3a1 1 0 0 0 .8-1v-1.6a1 1 0 0 0-.8-1Z"/></svg>
+    </a>
+  </header>
+  <main id="view" tabindex="-1"></main>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
